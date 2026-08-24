@@ -1,0 +1,97 @@
+# Active Directory Home Lab
+
+A self-built Active Directory environment run entirely in Oracle VirtualBox: a Windows Server 2025 domain controller (DNS, DHCP, AD DS) and a Windows 11 Pro client, networked together on an isolated internal network, with bulk user provisioning automated via PowerShell.
+
+Built following the structure of [Josh Madakor's AD home lab tutorial](https://www.youtube.com/watch?v=MHsI8hJmggI), updated for current OS versions and troubleshot from scratch.
+
+## Why I built this
+
+To get hands-on with core Active Directory concepts — domains, DNS, DHCP, OUs, group policy, domain-joining — the same infrastructure skills used in real enterprise IT and security environments, without needing physical hardware.
+
+## Architecture 
+
+```
+                    ┌─────────────────────────┐
+                           Host Machine (laptop) 
+                             Oracle VirtualBox  
+                    └────────────┬────────────┘
+                                     │
+        ┌────────────────────────┴────────────────────────┐
+        │                                                  │
+┌───────▼────────────────┐                    ┌────────────▼───────────┐
+│  DC1 — Domain Controller │                    │  Client1 — Workstation │
+│  Windows Server 2025     │◄──Internal Network──►│  Windows 11 Pro       │
+│  172.16.0.1               │      "intnet"        │  172.16.0.50           │
+│  Roles: AD DS, DNS, DHCP  │                    │  Domain-joined         │
+└───────┬────────────────┘                    └─────────────────────────┘
+        │
+   NAT Adapter
+        │
+   Internet (for
+   updates/activation)
+```
+
+- **DC1** runs Active Directory Domain Services, DNS, and DHCP, and has two network adapters: one NAT adapter for outbound internet access (updates, activation), and one Internal Network adapter serving the isolated lab network.
+- **Client1** only has an Internal Network adapter — it can only reach DC1, mirroring how a real workstation only has line-of-sight to its own domain infrastructure, not open internet by default.
+
+## What's in the domain
+
+- Domain: `mydomain.com`
+- Organizational Units: `_ADMINS`, `_USERS`
+- Bulk-generated user accounts created via [Josh Madakor's PowerShell script](https://github.com/joshmadakor1/AD_PS), which reads a list of names and provisions AD accounts for each one
+- A domain-joined Windows 11 Pro client, tested with a successful domain-account login
+
+## Build steps (high level)
+
+1. Installed Oracle VirtualBox + Extension Pack
+2. Downloaded Windows Server 2025 evaluation ISO (Standard edition, Desktop Experience) and a Windows 11 Pro ISO
+3. Created the DC1 VM, installed Windows Server, promoted it to a domain controller (new forest, `mydomain.com`)
+4. Configured a static internal IP, installed and authorized the DHCP role, created a scope with Router/DNS options
+5. Downloaded and ran the AD_PS PowerShell script to bulk-create users into a new `_USERS` OU
+6. Created the Client1 VM, installed Windows 11 Pro, configured networking, and joined it to the domain
+7. Verified the domain join and authentication by logging in as a domain account and confirming with `whoami`
+
+## Challenges I ran into (and how I solved them)
+
+**Disk partition error during Server install**
+Windows Setup rejected the target disk with "There is an error selecting this partition for install." The virtual disk had a leftover partition from a previous attempt. Fixed by deleting the existing partition on the disk selection screen, which returned it to unallocated space and let setup proceed normally.
+
+**PowerShell script couldn't find its dependency file**
+Running the user-creation script by its full path (`C:\path\to\script.ps1`) threw `Get-Content : Cannot find path '...\names.txt'`, because the script references `names.txt` relative to the current working directory, and the shell was still sitting in `C:\Windows\System32`. Fixed by `cd`-ing into the script's folder before running it, rather than invoking it by absolute path from elsewhere.
+
+**Windows 11 refused to install (TPM/Secure Boot requirements)**
+VirtualBox VMs don't have a virtual TPM or Secure Boot by default, and Windows 11 checks for both at setup. Solved two ways depending on the situation: enabling EFI + virtual TPM v2.0 in the VM's System settings before install, and using the `LabConfig` registry bypass (`BypassTPMCheck`, `BypassSecureBootCheck`, `BypassRAMCheck`) when the check still blocked setup.
+
+**Windows 11 install disk too small**
+Hit "The system drive needs to be at least 52 GB or larger" against a 49.4 GB virtual disk. Resized the virtual hard disk in VirtualBox before re-attempting install.
+
+**Client got no IP address (APIPA / 169.254.x.x)**
+`ipconfig` on the client showed a self-assigned APIPA address instead of a DHCP lease, and `ping` to the DC returned "General failure." Traced this back to the client's virtual network adapter being disabled at the VM settings level (**Enable Network Adapter** unchecked) — despite the adapter showing correctly in Device Manager. Re-enabling it, combined with making sure both VMs were powered on simultaneously, resolved connectivity. Learned in the process that DHCP requires both the DC and client to be running at the same time, same as physical machines needing to both be powered on to talk over a switch.
+
+**UAC blocked setting a static IP**
+Needed admin rights to switch the client's IPv4 assignment from DHCP to manual, but was logged into a standard (non-admin) local account rather than the one created during initial setup. Rebuilt the client VM and made sure to complete the actual Windows OOBE flow (rather than VirtualBox's unattended auto-install, which was silently skipping account creation prompts) so the first local account came through as an administrator by default.
+
+**Domain-joined login took longer than expected on first logon**
+First login to the domain account on the freshly-joined client took a couple of minutes with no clear progress indicator, since Windows was building the user's local profile and applying policy for the first time. Verified success afterward with `whoami`, which correctly returned `mydomain\<username>`.
+
+## Verification
+
+```
+C:\Users\a-znelson>whoami
+mydomain\a-znelson
+```
+
+Confirmed via `ping` that the client could reach the domain controller (0% packet loss, 172.16.0.1) after resolving the network adapter issue, and confirmed the domain-joined login by authenticating as a domain account and checking Active Directory Users and Computers on the DC to see the account listed under the `_ADMINS` OU.
+
+## Tools used
+
+- Oracle VirtualBox 7.2.16
+- Windows Server 2025 (evaluation, Standard edition, Desktop Experience)
+- Windows 11 Pro 25H2
+- [AD_PS](https://github.com/joshmadakor1/AD_PS) — PowerShell bulk user-creation script
+
+## What's next
+
+- Group Policy Objects applied to the `_USERS` OU
+- A second client to test multi-machine domain joins
+- Sysmon + Splunk for log collection and basic detection on top of this environment
