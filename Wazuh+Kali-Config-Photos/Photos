@@ -1,0 +1,13 @@
+Photo Descriptions
+
+01-wazuh-vmwgfx-boot-error.png	The Ubuntu 26.04 boot screen with the vmwgfx DRM error ("seems to be running on an unsupported hypervisor")
+02-wazuh-static-ip-confirmed.png	Terminal ip a output showing enp0s8 holding 172.16.0.10/24 after the netplan fix
+03-wazuh-install-complete.png	The final Wazuh install log — "Installation finished," showing the admin username and generated password
+04-wazuh-dashboard-no-agents.png	First dashboard login — Agents Summary showing "No results"
+05-dc1-dns-resolution-error.png	PowerShell on DC1 showing Invoke-WebRequest : The remote name could not be resolved: 'packages.wazuh.com'
+06-dc1-agent-install-log-success.png	The filtered MSI install log showing "Product: Wazuh Agent -- Configuration completed successfully"
+07-wazuh-dashboard-dc1-active.png	Dashboard Agents Summary showing green "Active (1)"
+08-kali-vm-attach-existing-disk.png	The VM creation wizard's "Specify virtual hard disk" screen with "Use an Existing Virtual Hard Disk File" selected
+09-kali-static-ip-config.png	The Kali terminal-based "Edit Connection" screen showing IPv4 Address 172.16.0.66 set to Manual
+10-kali-ping-dc1-unreachable.png	ping -c 3 172.16.0.1 returning "Destination Host Unreachable" (DC1 was off)
+11-kali-ping-dc1-success.png	Same ping command succeeding with "0% packet loss" once DC1 was booted
