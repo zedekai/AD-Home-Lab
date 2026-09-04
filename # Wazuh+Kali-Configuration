@@ -1,0 +1,97 @@
+Wazuh SIEM Integration — AD Home Lab Extension
+
+Extends the AD-Home-Lab environment with a SIEM stack and a dedicated attacker VM, moving the lab from "AD infrastructure" into SOC/blue-team territory: log ingestion, detection engineering, and (next milestone) incident write-ups against a simulated attack.
+
+Why
+
+Deploying and enrolling infrastructure is only half of a SOC-relevant skill set — the other half is seeing what that infrastructure reports and knowing how to interpret it. This phase adds a Wazuh manager to collect and correlate logs from DC1, and a Kali Linux VM to generate real attack traffic against it, so the detection pipeline can be tested end-to-end rather than just configured.
+
+Architecture
+                    ┌─────────────────────────┐
+                           Host Machine
+                        Oracle VirtualBox
+                   (VM storage: Crucial X9 SSD)
+                    └────────────┬────────────┘
+                                 │
+    ┌────────────────┬──────────┴──────────┬────────────────┐
+    │                 │                     │                │
+┌───▼─────────┐ ┌─────▼───────┐   ┌─────────▼────────┐ ┌─────▼──────────┐
+│ DC1          │ │ Client1     │   │ Wazuh-Manager     │ │ Kali-Attacker   │
+│ Server 2025  │ │ Win11 Pro   │   │ Ubuntu 26.04      │ │ Kali Linux      │
+│ 172.16.0.1   │ │ 172.16.0.50 │   │ 172.16.0.10       │ │ 172.16.0.66     │
+│ AD DS/DNS/DHCP│ │ intnet only │   │ Wazuh Indexer/    │ │ intnet only     │
+│ NAT + intnet │ │             │   │ Server/Dashboard  │ │ (isolated,      │
+│              │ │             │   │ NAT + intnet      │ │ no NAT adapter) │
+└──────────────┘ └─────────────┘   └───────────────────┘ └─────────────────┘
+
+Two new VMs join the existing DC1/Client1 pair, following the same dual-homing pattern already established in the base lab: intnet for internal traffic, NAT only where internet access is genuinely needed (package installs).
+
+Build: Wazuh-Manager
+
+Spec: Ubuntu Server 26.04, 4096 MB RAM, 2 vCPU, dual-homed (NAT + intnet), static IP 172.16.0.10 on the internal adapter.
+
+Static IP was set via netplan rather than DHCP, keeping it consistent with how DC1 and Client1 are addressed in the base lab:
+
+yaml
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: false
+      addresses: [172.16.0.10/24]
+
+Wazuh itself installs via the official all-in-one script:
+
+bash
+curl -O https://packages.wazuh.com/4.9/wazuh-install.sh
+sudo bash wazuh-install.sh -a
+Issues hit and resolved
+Issue	Cause	Fix
+vmwgfx DRM error on boot	Newer Ubuntu kernel's graphics driver incompatible with VirtualBox's default VMSVGA emulation	Changed Graphics Controller to VBoxSVGA in VM Display settings
+Static IP not applying after netplan apply	File permissions warning + systemd-networkd not running cleanly on first reload	chmod 600 on the netplan config, then explicit systemctl restart systemd-networkd before re-applying
+curl hanging / silently failing	Typo (-s0 instead of -sO) plus curl not yet installed	Installed curl via apt, corrected the flag
+Installer failed hardware check	VM under-provisioned relative to Wazuh's stated minimum (4GB RAM / 2 CPU) for the OpenSearch-based indexer	Powered off, bumped Base Memory to 4096 MB and CPU count to 2 in VirtualBox settings before retrying
+<p align="center"> <img src="screenshots/01-wazuh-vmwgfx-boot-error.png" width="600"><br> <em>vmwgfx boot error — resolved by switching the graphics controller</em> </p> <p align="center"> <img src="screenshots/02-wazuh-static-ip-confirmed.png" width="600"><br> <em>enp0s8 confirmed holding 172.16.0.10/24 after the netplan/networkd fix</em> </p> <p align="center"> <img src="screenshots/03-wazuh-install-complete.png" width="600"><br> <em>Wazuh all-in-one install completing — indexer, manager, dashboard, and filebeat all initialized</em> </p> <p align="center"> <img src="screenshots/04-wazuh-dashboard-no-agents.png" width="600"><br> <em>First dashboard login — no agents enrolled yet, baseline empty state</em> </p>
+Enrolling DC1 as an Agent
+
+Windows agent install, pointed at the manager's internal IP:
+
+powershell
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.9.0-1.msi -OutFile $env:tmp\wazuh-agent.msi
+msiexec.exe /i $env:tmp\wazuh-agent.msi /q WAZUH_MANAGER='172.16.0.10' WAZUH_AGENT_NAME='DC1'
+NET START WazuhSvc
+Issue hit and resolved: DNS resolution failure on the DC
+
+Invoke-WebRequest failed with The remote name could not be resolved: 'packages.wazuh.com'. This is expected behavior for a domain controller running its own DNS Server role — DC1's DNS client points at itself, and a fresh DNS Server role has no forwarder configured for external names by default, so it can resolve the domain zone but nothing on the internet.
+
+Fix: added public forwarders (8.8.8.8, 1.1.1.1) under DNS Manager → server properties → Forwarders tab. This is also a better long-term fix than routing around DNS, since it's a constraint that would resurface for any other tool pulled onto DC1 later.
+
+<p align="center"> <img src="screenshots/05-dc1-dns-resolution-error.png" width="600"><br> <em>DNS failure on DC1 — self-hosted DNS role with no external forwarder configured</em> </p> <p align="center"> <img src="screenshots/06-dc1-agent-install-log-success.png" width="600"><br> <em>Verbose MSI install log confirming successful agent configuration after the DNS fix</em> </p> <p align="center"> <img src="screenshots/07-wazuh-dashboard-dc1-active.png" width="600"><br> <em>DC1 reporting Active in the Wazuh dashboard — log pipeline confirmed end-to-end</em> </p>
+Build: Kali-Attacker
+
+Spec: Kali Linux (pre-built VirtualBox image), 2048 MB RAM, 2 vCPU, intnet only — no NAT adapter, matching the same isolation intent already applied to Client1. This VM should only ever see the lab network, not the open internet.
+
+Rather than going through VirtualBox's Import Appliance wizard (which expects .ovf/.ova and doesn't recognize the extracted .vbox/.vdi pair Kali ships), the VM was built manually:
+
+New VM → Linux / Debian (64-bit) — no dedicated "Kali" OS type exists, Kali is Debian-based
+Skipped ISO/unattended install
+Use an Existing Virtual Hard Disk File → registered the extracted .vdi via Virtual Media Manager → Add
+Adapter 1 set to Internal Network intnet, static IP 172.16.0.66/24 configured manually through NetworkManager
+<p align="center"> <img src="screenshots/08-kali-vm-attach-existing-disk.png" width="600"><br> <em>Manual VM creation, attaching the pre-built Kali disk directly instead of using Import Appliance</em> </p> <p align="center"> <img src="screenshots/09-kali-static-ip-config.png" width="600"><br> <em>Manual IPv4 configuration — 172.16.0.66/24, no gateway/DNS needed with no NAT adapter present</em> </p>
+Verifying connectivity to DC1
+
+First ping attempt failed with Destination Host Unreachable — DC1 simply wasn't powered on yet. Once DC1 was booted, the same command succeeded cleanly:
+
+<p align="center"> <img src="screenshots/10-kali-ping-dc1-unreachable.png" width="600"><br> <em>Expected failure — DC1 offline at time of test</em> </p> <p align="center"> <img src="screenshots/11-kali-ping-dc1-success.png" width="600"><br> <em>0% packet loss once DC1 is running — full network path confirmed: Kali → intnet → DC1</em> </p>
+Current Status
+✅ Wazuh-Manager deployed, indexer/manager/dashboard operational
+✅ DC1 enrolled and reporting as an active agent
+✅ Kali-Attacker built, networked, and connectivity to DC1 confirmed
+⏳ Next milestone: simulate a brute-force attack (repeated failed domain logons) from Kali against DC1, confirm Wazuh's built-in rule correlation fires an alert on Event ID 4625, and write up detection + response as a SOC-style incident report.
+What's Next
+Run the brute-force simulation and capture the resulting alert
+Document detection (rule fired, source, severity) and response (triage steps, containment, remediation recommendation)
+Map the detection to its corresponding MITRE ATT&CK technique (T1110 — Brute Force) using Wazuh's built-in ATT&CK view
+Optionally enroll Client1 as a second agent for baseline/comparison data
