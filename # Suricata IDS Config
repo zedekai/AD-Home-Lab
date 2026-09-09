@@ -1,0 +1,73 @@
+Network IDS Integration: Suricata + Wazuh
+Overview
+
+The lab originally had one layer of detection: a Wazuh agent installed directly on DC1, watching that host's own logs and events. That's host-based detection — it only sees what happens on the machine.
+
+This update adds a second, different kind of detection: a network-based IDS watching the traffic between machines, not just what happens on one of them. Together, the two give the lab a real "defense in depth" setup:
+
+Host-based (Wazuh agent on DC1): catches things that happen locally — failed logins, file changes, process activity.
+Network-based (Suricata): catches things that happen on the wire — a port scan, unusual traffic patterns, connections to ports that shouldn't be talked to.
+
+Both now report into the same place: the Wazuh dashboard.
+
+Why Suricata instead of Snort
+
+The original plan was to use Snort, since it's the more commonly-referenced tool in study material. In practice, Snort isn't currently packaged for Ubuntu 26.04 ("Resolute") — the OS this lab's Wazuh-Manager VM runs. Rather than fight an unsupported package, I switched to Suricata, which is:
+
+Actively maintained and fully packaged for this OS version
+Multi-threaded (faster on modern hardware than Snort's older architecture)
+Increasingly the more common choice in real SOC environments today
+
+Lesson: sometimes the "textbook" tool isn't the right practical choice, and knowing when to substitute a better-supported equivalent is itself a useful skill.
+
+Architecture
+Kali-Attacker (172.16.0.66)
+        |
+        |  attack traffic (e.g. Nmap scan)
+        v
+   intnet segment  <---- Suricata (network-based IDS) watches all traffic here
+        |
+        v
+DC1 (172.16.0.1)  <---- Wazuh agent (host-based) watches this machine's own logs
+        |
+        v
+Wazuh-Manager (172.16.0.10)  <---- both Suricata alerts (eve.json) and the
+                                    DC1 agent's events land here
+        |
+        v
+   Wazuh Dashboard (single pane of glass for both layers)
+Setup Summary
+Installed Suricata on the Wazuh-Manager VM (sudo apt install suricata), after enabling the universe repository.
+Pointed Suricata at the correct network interface (enp0s8, the one facing intnet — not the NAT adapter).
+Pulled the free Emerging Threats Open ruleset with suricata-update (~52,700 signatures).
+Configured Wazuh to read Suricata's structured alert log (/var/log/suricata/eve.json) by adding a <localfile> block to ossec.conf and restarting the Wazuh manager service.
+Verified the full pipeline by running an Nmap SYN scan from Kali-Attacker against DC1 and confirming the alert appeared both in Suricata's own log and in the Wazuh dashboard.
+Troubleshooting Journey
+
+This integration didn't work on the first try — or the fifth. Documenting the actual debugging path, because the process is more instructive than the final config:
+
+Symptom	Root Cause	Fix
+apt install snort failed with "Unable to locate package"	Snort isn't packaged for Ubuntu 26.04 (Resolute) at all	Switched to Suricata, which is
+Suricata ran, but the alert log stayed empty even with real traffic confirmed reaching DC1	Suricata was watching from a third host (Wazuh-Manager) on a VirtualBox internal network — by default it only sees traffic addressed to itself, not traffic between two other VMs	Enabled Promiscuous Mode → Allow All on the Wazuh-Manager VM's intnet adapter in VirtualBox
+Still no alerts, and an af-packet: cluster-id 99 already in use error appeared	A systemd-managed Suricata service had auto-started in the background and was fighting my manual foreground test runs for the same network socket	Stopped and disabled the systemd service (systemctl stop/disable suricata) so only one instance runs at a time
+A custom "match anything" test rule still didn't fire	My rule lived in local.rules, but that file was never actually referenced in suricata.yaml's rule-files: list — Suricata never read it	Added /etc/suricata/rules/local.rules to the rule-files: list
+Even the full 52,700-rule Emerging Threats ruleset never matched the Nmap scan	Most ET signatures are written to detect $EXTERNAL_NET -> $HOME_NET traffic (an outside attacker). Since Kali-Attacker is inside the same /24 as everything else, this was internal-to-internal traffic, which most rules explicitly ignore	Wrote a custom rule scoped to $HOME_NET -> $HOME_NET, matching Nmap's known SYN-scan fingerprint (TCP window size 1024)
+
+The real lesson from this section: an IDS that "starts successfully" and prints no errors is not the same as an IDS that is actually working. Every layer — capture visibility, process conflicts, rule loading, and rule logic — had to be verified independently with raw tools (tcpdump, ps aux, suricata -T -v) before trusting the end-to-end result.
+
+The Detection Rule
+
+Instead of relying only on the generic Emerging Threats ruleset, I added a rule specific to this lab, matching the exact fingerprint of the Nmap scan traffic observed via tcpdump:
+
+alert tcp $HOME_NET any -> $HOME_NET any (msg:"LOCAL SCAN Possible Nmap -sS scan (window 1024)"; flags:S; window:1024; classtype:attempted-recon; sid:9000002; rev:1;)
+
+This mirrors a real Emerging Threats signature (ET SCAN NMAP -sS window 1024, sid 2009582), adapted so it also fires on internal-to-internal traffic — appropriate for a lab where the "attacker" and "victim" live on the same segment.
+
+Result
+Suricata detects the Nmap SYN scan from Kali-Attacker in real time, both in its own log and in the Wazuh dashboard.
+Detection now happens at two independent layers (network + host), correlated in one place.
+The lab now demonstrates not just "I installed a tool," but a realistic detection engineering workflow: deploy, test, debug, and document.
+Next Steps
+Replace the single test/detection rule with a broader, curated internal-scan ruleset.
+Extend Wazuh active response to automatically react to a confirmed Suricata scan alert (e.g., temporary firewall block).
+Fold this detection path into the in-progress AI Security Pipeline project, so Suricata alerts can also be summarized by the local LLM triage layer.
